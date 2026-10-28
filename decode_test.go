@@ -1204,24 +1204,27 @@ func TestUnmarshalSyntax(t *testing.T) {
 }
 
 // Test handling of unexported fields that should be ignored.
-// Issue 4660
-type unexportedFields struct {
-	Name string
-	m    map[string]interface{} `json:"-"`
-	m2   map[string]interface{} `json:"abcd"`
-}
-
+// Issue 4660.
+// reflect.StructOf keeps the json:"abcd" tag on m2. go vet rejects that
+// tag on a named unexported field; encoding/json is exempt.
 func TestUnmarshalUnexported(t *testing.T) {
+	mapType := reflect.TypeOf(map[string]interface{}(nil))
+	typ := reflect.StructOf([]reflect.StructField{
+		{Name: "Name", Type: reflect.TypeOf("")},
+		{Name: "m", Type: mapType, Tag: `json:"-"`, PkgPath: "github.com/zamicol/json5"},
+		{Name: "m2", Type: mapType, Tag: `json:"abcd"`, PkgPath: "github.com/zamicol/json5"},
+	})
 	input := `{"Name": "Bob", "m": {"x": 123}, "m2": {"y": 456}, "abcd": {"z": 789}}`
-	want := &unexportedFields{Name: "Bob"}
+	out := reflect.New(typ)
+	want := reflect.New(typ).Elem()
+	want.Field(0).SetString("Bob")
 
-	out := &unexportedFields{}
-	err := Unmarshal([]byte(input), out)
+	err := Unmarshal([]byte(input), out.Interface())
 	if err != nil {
 		t.Errorf("got error %v, expected nil", err)
 	}
-	if !reflect.DeepEqual(out, want) {
-		t.Errorf("got %q, want %q", out, want)
+	if !reflect.DeepEqual(out.Elem().Interface(), want.Interface()) {
+		t.Errorf("got %#v, want %#v", out.Elem().Interface(), want.Interface())
 	}
 }
 
