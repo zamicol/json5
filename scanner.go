@@ -13,7 +13,11 @@ package json5
 // This file starts with two simple examples using the scanner
 // before diving into the scanner itself.
 
-import "strconv"
+import (
+	"strconv"
+	"unicode"
+	"unicode/utf8"
+)
 
 // checkValid verifies that data is valid JSON-encoded data.
 // scan is passed in for use by checkValid to avoid an allocation.
@@ -91,6 +95,12 @@ type scanner struct {
 	// to resume normal parsing when a comment ends.
 	commentEndStep func(*scanner, byte) int
 
+	// Partial UTF-8 white space (wsLen == 0 when idle).
+	ws     [utf8.UTFMax]byte
+	wsLen  int
+	wsStep func(*scanner, byte) int
+	wsOp   int
+
 	// Reached end of top-level value.
 	endTop bool
 
@@ -152,12 +162,17 @@ func (s *scanner) reset() {
 	s.err = nil
 	s.redo = false
 	s.endTop = false
+	s.wsLen = 0
 }
 
 // eof tells the scanner that the end of input has been reached.
 // It returns a scan status just as s.step does.
 func (s *scanner) eof() int {
 	if s.err != nil {
+		return scanError
+	}
+	if s.wsLen > 0 {
+		s.err = &SyntaxError{"unexpected end of JSON input", s.bytes}
 		return scanError
 	}
 	if s.endTop {
@@ -193,13 +208,51 @@ func (s *scanner) popParseState() {
 }
 
 func isSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f'
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f'
+}
+
+// isJSON5Space reports JSON5 white space: White_Space except U+0085, plus the BOM.
+func isJSON5Space(r rune) bool {
+	return r == '\uFEFF' || (r != '\u0085' && unicode.IsSpace(r))
+}
+
+func isSpaceLead(c byte) bool {
+	return c == 0xC2 || c == 0xE1 || c == 0xE2 || c == 0xE3 || c == 0xEF
+}
+
+// skipSpace reports whether c is white space. Multi-byte spaces end in stateMultiByteSpace.
+func (s *scanner) skipSpace(c byte, resume func(*scanner, byte) int, op int) (int, bool) {
+	if c <= ' ' && isSpace(c) {
+		s.step = resume
+		return op, true
+	}
+	if !isSpaceLead(c) {
+		return 0, false
+	}
+	s.ws[0], s.wsLen, s.wsStep, s.wsOp = c, 1, resume, op
+	s.step = stateMultiByteSpace
+	return op, true
+}
+
+func stateMultiByteSpace(s *scanner, c byte) int {
+	s.ws[s.wsLen] = c
+	s.wsLen++
+	if !utf8.FullRune(s.ws[:s.wsLen]) {
+		return s.wsOp
+	}
+	r, _ := utf8.DecodeRune(s.ws[:s.wsLen])
+	s.wsLen = 0
+	if !isJSON5Space(r) {
+		return s.error(c, "looking for beginning of value")
+	}
+	s.step = s.wsStep
+	return s.wsOp
 }
 
 // stateBeginValueOrEmpty is the state after reading `[`.
 func stateBeginValueOrEmpty(s *scanner, c byte) int {
-	if c <= ' ' && isSpace(c) {
-		return scanSkipSpace
+	if op, ok := s.skipSpace(c, stateBeginValueOrEmpty, scanSkipSpace); ok {
+		return op
 	}
 	if c == ']' {
 		return stateEndValue(s, c)
@@ -214,8 +267,8 @@ func stateBeginValueOrEmpty(s *scanner, c byte) int {
 
 // stateBeginValue is the state at the beginning of the input.
 func stateBeginValue(s *scanner, c byte) int {
-	if c <= ' ' && isSpace(c) {
-		return scanSkipSpace
+	if op, ok := s.skipSpace(c, stateBeginValue, scanSkipSpace); ok {
+		return op
 	}
 	switch c {
 	case '{':
@@ -280,24 +333,49 @@ func stateBeginComment(s *scanner, c byte) int {
 	return s.error(c, "potentially starting comment")
 }
 
+// U+2028 and U+2029 (E2 80 A8 / E2 80 A9) end a line comment, as do CR and LF.
 func stateInLineComment(s *scanner, c byte) int {
 	if c == '\r' {
 		s.step = stateInLineCommentCR
 	}
 	if c == '\n' {
-		s.step = s.commentEndStep
-		s.commentEndStep = nil
+		s.finishLineComment()
+	}
+	if c == 0xE2 {
+		s.step = stateInLineCommentE2
 	}
 	return scanSkipSpace
 }
 
+func (s *scanner) finishLineComment() {
+	s.step = s.commentEndStep
+	s.commentEndStep = nil
+}
+
 func stateInLineCommentCR(s *scanner, c byte) int {
 	if c == '\n' {
-		s.step = s.commentEndStep
-		s.commentEndStep = nil
+		s.finishLineComment()
 		return scanSkipSpace
 	}
 	return s.commentEndStep(s, c)
+}
+
+func stateInLineCommentE2(s *scanner, c byte) int {
+	if c == 0x80 {
+		s.step = stateInLineCommentE280
+		return scanSkipSpace
+	}
+	s.step = stateInLineComment
+	return stateInLineComment(s, c)
+}
+
+func stateInLineCommentE280(s *scanner, c byte) int {
+	if c == 0xA8 || c == 0xA9 {
+		s.finishLineComment()
+		return scanSkipSpace
+	}
+	s.step = stateInLineComment
+	return stateInLineComment(s, c)
 }
 
 func stateInBlockComment(s *scanner, c byte) int {
@@ -324,8 +402,8 @@ func stateMaybeEndBlockComment(s *scanner, c byte) int {
 
 // stateBeginObjectKeyOrEmpty is the state after reading `{`.
 func stateBeginObjectKeyOrEmpty(s *scanner, c byte) int {
-	if c <= ' ' && isSpace(c) {
-		return scanSkipSpace
+	if op, ok := s.skipSpace(c, stateBeginObjectKeyOrEmpty, scanSkipSpace); ok {
+		return op
 	}
 	if c == '}' {
 		n := len(s.parseState)
@@ -342,8 +420,8 @@ func stateBeginObjectKeyOrEmpty(s *scanner, c byte) int {
 
 // stateBeginObjectKey is the state after reading `{"key": value,`.
 func stateBeginObjectKey(s *scanner, c byte) int {
-	if c <= ' ' && isSpace(c) {
-		return scanSkipSpace
+	if op, ok := s.skipSpace(c, stateBeginObjectKey, scanSkipSpace); ok {
+		return op
 	}
 	if c == '"' {
 		s.step = stateInStringDouble
@@ -368,7 +446,7 @@ func stateBeginObjectKey(s *scanner, c byte) int {
 
 // stateInKeyLiteral is the state when starting to read an object key with no quotes
 func stateInKeyLiteral(s *scanner, c byte) int {
-	if c == ':' || isSpace(c) {
+	if c == ':' || isSpace(c) || isSpaceLead(c) {
 		return stateEndValue(s, c)
 	}
 	if !isValidKeyLiteralByte(c) {
@@ -395,9 +473,8 @@ func stateEndValue(s *scanner, c byte) int {
 		s.endTop = true
 		return stateEndTop(s, c)
 	}
-	if c <= ' ' && isSpace(c) {
-		s.step = stateEndValue
-		return scanSkipSpace
+	if op, ok := s.skipSpace(c, stateEndValue, scanSkipSpace); ok {
+		return op
 	}
 	if c == '/' {
 		s.step = stateBeginComment
@@ -447,10 +524,11 @@ func stateEndTop(s *scanner, c byte) int {
 		s.commentEndStep = stateEndTop
 		return scanSkipSpace
 	}
-	if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
-		// Complain about non-space byte on next call.
-		s.error(c, "after top-level value")
+	if op, ok := s.skipSpace(c, stateEndTop, scanEnd); ok {
+		return op
 	}
+	// Complain about non-space byte on next call.
+	s.error(c, "after top-level value")
 	return scanEnd
 }
 
