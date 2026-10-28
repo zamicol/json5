@@ -487,20 +487,71 @@ func stateInStringSingle(s *scanner, c byte) int {
 }
 
 // stateInStringEsc is the state after reading `"\` during a quoted string.
+// JSON5 string escapes:
+//   - single-character escapes, including \v, and a line continuation
+//   - \0 when the next byte is not a digit
+//   - \xHH and \uXXXX
+//   - any other byte, which stands for itself
+//
+// Digits 1-9 are errors. U+2028 and U+2029 line continuations arrive one
+// byte at a time; unquoteBytes drops the whole sequence.
 func stateInStringEsc(resume func(s *scanner, c byte) int) func(s *scanner, c byte) int {
 	return func(s *scanner, c byte) int {
 		switch c {
-		case 'b', 'f', 'n', 'r', 't', '\\', '/', '"', '\'', '\n':
+		case 'b', 'f', 'n', 'r', 't', 'v', '\\', '/', '"', '\'', '\n':
 			s.step = resume
 			return scanContinue
 		case 'u':
 			s.step = stateInStringEscU(resume)
 			return scanContinue
+		case 'x':
+			s.step = stateInStringEscX(resume)
+			return scanContinue
+		case '0':
+			s.step = stateInStringEsc0(resume)
+			return scanContinue
 		case '\r':
 			s.step = stateInStringEscCR(resume)
 			return scanContinue
+		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			return s.error(c, "in string escape code")
 		}
-		return s.error(c, "in string escape code")
+		s.step = resume
+		return scanContinue
+	}
+}
+
+// stateInStringEsc0 is the state after reading `"\0` during a quoted string.
+// A following decimal digit is an error; JSON5 has no octal escapes.
+func stateInStringEsc0(resume func(s *scanner, c byte) int) func(s *scanner, c byte) int {
+	return func(s *scanner, c byte) int {
+		if '0' <= c && c <= '9' {
+			return s.error(c, "in string escape code")
+		}
+		s.step = resume
+		return resume(s, c)
+	}
+}
+
+// stateInStringEscX is the state after reading `"\x` during a quoted string.
+func stateInStringEscX(resume func(s *scanner, c byte) int) func(s *scanner, c byte) int {
+	return func(s *scanner, c byte) int {
+		if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
+			s.step = stateInStringEscX1(resume)
+			return scanContinue
+		}
+		return s.error(c, "in \\x hexadecimal character escape")
+	}
+}
+
+// stateInStringEscX1 is the state after reading `"\x1` during a quoted string.
+func stateInStringEscX1(resume func(s *scanner, c byte) int) func(s *scanner, c byte) int {
+	return func(s *scanner, c byte) int {
+		if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
+			s.step = resume
+			return scanContinue
+		}
+		return s.error(c, "in \\x hexadecimal character escape")
 	}
 }
 

@@ -1237,7 +1237,25 @@ func unquoteBytes(s []byte) (t []byte, ok bool) {
 			}
 			switch s[r] {
 			default:
-				return
+				// Other characters after a backslash:
+				//   - digits 1-9 are errors
+				//   - U+2028 and U+2029 are line continuations
+				//   - anything else is that character
+				if s[r] >= '1' && s[r] <= '9' {
+					return
+				}
+				if s[r] < utf8.RuneSelf {
+					b[w] = s[r]
+					r++
+					w++
+					break
+				}
+				rr, size := utf8.DecodeRune(s[r:])
+				r += size
+				if rr == '\u2028' || rr == '\u2029' {
+					break
+				}
+				w += utf8.EncodeRune(b[w:], rr)
 			case '"', '\\', '/', '\'':
 				b[w] = s[r]
 				r++
@@ -1269,6 +1287,29 @@ func unquoteBytes(s []byte) (t []byte, ok bool) {
 				b[w] = '\t'
 				r++
 				w++
+			case 'v':
+				b[w] = '\v'
+				r++
+				w++
+			case '0':
+				// NUL, unless a digit follows. \00 is not octal.
+				if r+1 < len(s) && s[r+1] >= '0' && s[r+1] <= '9' {
+					return
+				}
+				b[w] = 0
+				r++
+				w++
+			case 'x':
+				// \xHH is a code point in U+0000 through U+00FF.
+				if r+2 >= len(s) {
+					return
+				}
+				rr, err := strconv.ParseUint(string(s[r+1:r+3]), 16, 8)
+				if err != nil {
+					return
+				}
+				r += 3
+				w += utf8.EncodeRune(b[w:], rune(rr))
 			case 'u':
 				r--
 				rr := getu4(s[r:])
