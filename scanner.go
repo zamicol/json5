@@ -307,10 +307,17 @@ func stateInBlockComment(s *scanner, c byte) int {
 	return scanSkipSpace
 }
 
+// stateMaybeEndBlockComment is the state after reading '*' in a block comment.
+// A block comment ends only at the exact sequence "*/":
+//   - '/' ends the comment
+//   - '*' stays here; it may start "*/"
+//   - any other byte returns to the comment body
 func stateMaybeEndBlockComment(s *scanner, c byte) int {
 	if c == '/' {
 		s.step = s.commentEndStep
 		s.commentEndStep = nil
+	} else if c != '*' {
+		s.step = stateInBlockComment
 	}
 	return scanSkipSpace
 }
