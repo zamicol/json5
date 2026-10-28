@@ -1,0 +1,6 @@
+{
+    at: 6,
+    lineNumber: 1,
+    columnNumber: 6,
+    message: "Bad escape"
+}
