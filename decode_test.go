@@ -1350,6 +1350,68 @@ func TestInvalidUnmarshalText(t *testing.T) {
 	}
 }
 
+// TestLeftoverAfterValue checks bytes that follow a complete value.
+// U+00A3 POUND SIGN (£) is UTF-8 C2 A3. That lead byte also starts
+// U+00A0 NO-BREAK SPACE, so the multi-byte space scanner used to report
+// "looking for beginning of value" even when a value was already complete.
+func TestLeftoverAfterValue(t *testing.T) {
+	tests := []struct {
+		in     string
+		msg    string
+		offset int64
+	}{
+		// ASCII leftovers already use these contexts.
+		{in: "1x2", msg: "invalid character 'x' after top-level value", offset: 2},
+		{in: "[1x]", msg: "invalid character 'x' after array element", offset: 3},
+		{in: "{a:1}x", msg: "invalid character 'x' after top-level value", offset: 6},
+		{in: "{a:1x}", msg: "invalid character 'x' after object key:value pair", offset: 5},
+
+		// Pound sign: lead byte looks like a Unicode space.
+		{in: "1\u00a32", msg: "invalid character '£' after top-level value", offset: 3},
+		{in: "1\u00a3", msg: "invalid character '£' after top-level value", offset: 3},
+		{in: "[1\u00a3]", msg: "invalid character '£' after array element", offset: 4},
+		{in: "{a:1}\u00a3", msg: "invalid character '£' after top-level value", offset: 7},
+		{in: "{a:1\u00a3}", msg: "invalid character '£' after object key:value pair", offset: 6},
+		{in: "true\u00a3", msg: "invalid character '£' after top-level value", offset: 6},
+		{in: "{a\u00a3:1}", msg: "invalid character '£' after object key", offset: 4},
+
+		// U+0085 is White_Space but not JSON5 white space, and shares C2 with NBSP.
+		{in: "1\u0085", msg: "invalid character '\\u0085' after top-level value", offset: 3},
+
+		// U+20AC EURO SIGN is E2 82 AC. E2 also leads several Unicode spaces.
+		// The scanner quotes the last byte, U+00AC NOT SIGN.
+		{in: "1\u20ac2", msg: "invalid character '¬' after top-level value", offset: 4},
+
+		// Same lead byte before a value is still "beginning of value".
+		{in: "\u00a31", msg: "invalid character '£' looking for beginning of value", offset: 2},
+		{in: "[1,\u00a3]", msg: "invalid character '£' looking for beginning of value", offset: 5},
+		{in: "{\u00a3:1}", msg: "invalid character '£' looking for beginning of object key", offset: 3},
+
+		// NBSP is real JSON5 white space, so the following byte is the leftover.
+		{in: "1\u00a02", msg: "invalid character '2' after top-level value", offset: 4},
+	}
+	for _, tt := range tests {
+		var v interface{}
+		err := Unmarshal([]byte(tt.in), &v)
+		se, ok := err.(*SyntaxError)
+		if !ok {
+			t.Errorf("Unmarshal(%q) error = %v, want *SyntaxError", tt.in, err)
+			continue
+		}
+		if se.msg != tt.msg || se.Offset != tt.offset {
+			t.Errorf("Unmarshal(%q) = %q offset %d, want %q offset %d", tt.in, se.msg, se.Offset, tt.msg, tt.offset)
+		}
+	}
+
+	// A trailing NBSP is white space, not a leftover character.
+	var v interface{}
+	if err := Unmarshal([]byte("1\u00a0"), &v); err != nil {
+		t.Errorf("Unmarshal(%q) unexpected error: %v", "1\u00a0", err)
+	} else if v != float64(1) {
+		t.Errorf("Unmarshal(%q) = %#v, want 1", "1\u00a0", v)
+	}
+}
+
 func TestDecodeSingleQuoteStringInterface(t *testing.T) {
 	buf := []byte(`{ 'key': 'value' }`)
 	got := make(map[string]interface{})

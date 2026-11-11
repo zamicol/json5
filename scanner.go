@@ -100,6 +100,7 @@ type scanner struct {
 	wsLen  int
 	wsStep func(*scanner, byte) int
 	wsOp   int
+	wsCtx  string // syntax-error context if the sequence is not white space
 
 	// Reached end of top-level value.
 	endTop bool
@@ -163,6 +164,7 @@ func (s *scanner) reset() {
 	s.redo = false
 	s.endTop = false
 	s.wsLen = 0
+	s.wsCtx = ""
 }
 
 // eof tells the scanner that the end of input has been reached.
@@ -221,7 +223,8 @@ func isSpaceLead(c byte) bool {
 }
 
 // skipSpace reports whether c is white space. Multi-byte spaces end in stateMultiByteSpace.
-func (s *scanner) skipSpace(c byte, resume func(*scanner, byte) int, op int) (int, bool) {
+// ctx is the syntax-error context if a lead byte does not begin white space.
+func (s *scanner) skipSpace(c byte, resume func(*scanner, byte) int, op int, ctx string) (int, bool) {
 	if c <= ' ' && isSpace(c) {
 		s.step = resume
 		return op, true
@@ -229,7 +232,7 @@ func (s *scanner) skipSpace(c byte, resume func(*scanner, byte) int, op int) (in
 	if !isSpaceLead(c) {
 		return 0, false
 	}
-	s.ws[0], s.wsLen, s.wsStep, s.wsOp = c, 1, resume, op
+	s.ws[0], s.wsLen, s.wsStep, s.wsOp, s.wsCtx = c, 1, resume, op, ctx
 	s.step = stateMultiByteSpace
 	return op, true
 }
@@ -243,15 +246,33 @@ func stateMultiByteSpace(s *scanner, c byte) int {
 	r, _ := utf8.DecodeRune(s.ws[:s.wsLen])
 	s.wsLen = 0
 	if !isJSON5Space(r) {
-		return s.error(c, "looking for beginning of value")
+		// The lead byte only looked like white space. Keep the caller's
+		// context (for example "after top-level value") instead of always
+		// reporting "looking for beginning of value".
+		return s.error(c, s.wsCtx)
 	}
 	s.step = s.wsStep
 	return s.wsOp
 }
 
+// afterValueContext is the syntax-error context for a non-space byte
+// after a completed value that is not the top-level value.
+func (s *scanner) afterValueContext() string {
+	switch s.parseState[len(s.parseState)-1] {
+	case parseObjectKey:
+		return "after object key"
+	case parseObjectValue:
+		return "after object key:value pair"
+	case parseArrayValue:
+		return "after array element"
+	default:
+		return ""
+	}
+}
+
 // stateBeginValueOrEmpty is the state after reading `[`.
 func stateBeginValueOrEmpty(s *scanner, c byte) int {
-	if op, ok := s.skipSpace(c, stateBeginValueOrEmpty, scanSkipSpace); ok {
+	if op, ok := s.skipSpace(c, stateBeginValueOrEmpty, scanSkipSpace, "looking for beginning of value"); ok {
 		return op
 	}
 	if c == ']' {
@@ -267,7 +288,7 @@ func stateBeginValueOrEmpty(s *scanner, c byte) int {
 
 // stateBeginValue is the state at the beginning of the input.
 func stateBeginValue(s *scanner, c byte) int {
-	if op, ok := s.skipSpace(c, stateBeginValue, scanSkipSpace); ok {
+	if op, ok := s.skipSpace(c, stateBeginValue, scanSkipSpace, "looking for beginning of value"); ok {
 		return op
 	}
 	switch c {
@@ -402,7 +423,7 @@ func stateMaybeEndBlockComment(s *scanner, c byte) int {
 
 // stateBeginObjectKeyOrEmpty is the state after reading `{`.
 func stateBeginObjectKeyOrEmpty(s *scanner, c byte) int {
-	if op, ok := s.skipSpace(c, stateBeginObjectKeyOrEmpty, scanSkipSpace); ok {
+	if op, ok := s.skipSpace(c, stateBeginObjectKeyOrEmpty, scanSkipSpace, "looking for beginning of object key"); ok {
 		return op
 	}
 	if c == '}' {
@@ -420,7 +441,7 @@ func stateBeginObjectKeyOrEmpty(s *scanner, c byte) int {
 
 // stateBeginObjectKey is the state after reading `{"key": value,`.
 func stateBeginObjectKey(s *scanner, c byte) int {
-	if op, ok := s.skipSpace(c, stateBeginObjectKey, scanSkipSpace); ok {
+	if op, ok := s.skipSpace(c, stateBeginObjectKey, scanSkipSpace, "looking for beginning of object key"); ok {
 		return op
 	}
 	if c == '"' {
@@ -473,7 +494,7 @@ func stateEndValue(s *scanner, c byte) int {
 		s.endTop = true
 		return stateEndTop(s, c)
 	}
-	if op, ok := s.skipSpace(c, stateEndValue, scanSkipSpace); ok {
+	if op, ok := s.skipSpace(c, stateEndValue, scanSkipSpace, s.afterValueContext()); ok {
 		return op
 	}
 	if c == '/' {
@@ -524,7 +545,7 @@ func stateEndTop(s *scanner, c byte) int {
 		s.commentEndStep = stateEndTop
 		return scanSkipSpace
 	}
-	if op, ok := s.skipSpace(c, stateEndTop, scanEnd); ok {
+	if op, ok := s.skipSpace(c, stateEndTop, scanEnd, "after top-level value"); ok {
 		return op
 	}
 	// Complain about non-space byte on next call.
