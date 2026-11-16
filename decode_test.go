@@ -261,7 +261,7 @@ var unmarshalTests = []unmarshalTest{
 	{in: `"g-clef: \uD834\uDD1E"`, ptr: new(string), out: "g-clef: \U0001D11E"},
 	{in: `"invalid: \uD834x\uDD1E"`, ptr: new(string), out: "invalid: \uFFFDx\uFFFD"},
 	{in: "null", ptr: new(interface{}), out: nil},
-	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf(""), 7}},
+	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf(""), 7, "T", "X"}},
 	{in: `{"x": 1}`, ptr: new(tx), out: tx{}},
 	{in: `{"x": 1}`, ptr: new(tx), err: fmt.Errorf("json: unknown field \"x\""), disallowUnknownFields: true},
 	{in: `{"F1":1,"F2":2,"F3":3}`, ptr: new(V), out: V{F1: float64(1), F2: int32(2), F3: Number("3")}},
@@ -479,12 +479,12 @@ var unmarshalTests = []unmarshalTest{
 	{
 		in:  `{"2009-11-10T23:00:00Z": "hello world"}`,
 		ptr: &map[Point]string{},
-		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[Point]string{}), 1},
+		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[Point]string{}), 1, "", ""},
 	},
 	{
 		in:  `{"asdf": "hello world"}`,
 		ptr: &map[unmarshaler]string{},
-		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[unmarshaler]string{}), 1},
+		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[unmarshaler]string{}), 1, "", ""},
 	},
 
 	// additional tests for disallowUnknownFields
@@ -1179,6 +1179,374 @@ func TestUnmarshalTypeError(t *testing.T) {
 			t.Errorf("expected type error for Unmarshal(%q, type %T): got %T",
 				item.src, item.dest, err)
 		}
+	}
+}
+
+// fieldTypeError is a type mismatch reported with the same struct and field
+// path as encoding/json. Struct is the root type name after one pointer
+// dereference. Field is the JSON path from that root, with '/' written as
+// '.' and array indexes included. The key text is preserved as decoded.
+type fieldTypeError struct {
+	name       string
+	in         string
+	newPtr     func() interface{}
+	value      string
+	typ        reflect.Type
+	structName string
+	field      string
+}
+
+func TestUnmarshalTypeErrorStructField(t *testing.T) {
+	type Config struct {
+		Timeout int `json:"timeout"`
+	}
+	type Nested struct {
+		Count int `json:"count"`
+	}
+	type Outer struct {
+		Nested Nested   `json:"nested"`
+		Items  []Nested `json:"items"`
+		Ptr    *Nested  `json:"ptr"`
+		Anon   struct {
+			V int `json:"v"`
+		} `json:"anon"`
+		Data map[string]string `json:"data"`
+		Nums []int             `json:"nums"`
+	}
+	type Slash struct {
+		AB int `json:"a/b"`
+	}
+	type Inner struct {
+		N int `json:"n"`
+	}
+	type Mid struct {
+		Inner
+	}
+	type Deep struct {
+		Mid
+	}
+	type Box struct {
+		N int `json:"n"`
+	}
+	type Holder struct {
+		Boxes []*Box `json:"boxes"`
+	}
+	type Pair struct {
+		A int `json:"a"`
+		B int `json:"b"`
+	}
+	type Flag struct {
+		OK bool `json:"ok"`
+	}
+
+	intType := reflect.TypeOf(0)
+	stringType := reflect.TypeOf("")
+	boolType := reflect.TypeOf(false)
+
+	tests := []fieldTypeError{
+		{
+			name:       "tagged field",
+			in:         `{"timeout": "10s"}`,
+			newPtr:     func() interface{} { return new(Config) },
+			value:      "string",
+			typ:        intType,
+			structName: "Config",
+			field:      "timeout",
+		},
+		{
+			name:       "nil struct pointer",
+			in:         `{"timeout": "10s"}`,
+			newPtr:     func() interface{} { return new(*Config) },
+			value:      "string",
+			typ:        intType,
+			structName: "",
+			field:      "timeout",
+		},
+		{
+			name:       "nested struct",
+			in:         `{"nested": {"count": "x"}}`,
+			newPtr:     func() interface{} { return new(Outer) },
+			value:      "string",
+			typ:        intType,
+			structName: "Outer",
+			field:      "nested.count",
+		},
+		{
+			name:       "pointer to nested struct",
+			in:         `{"ptr": {"count": "x"}}`,
+			newPtr:     func() interface{} { return new(Outer) },
+			value:      "string",
+			typ:        intType,
+			structName: "Outer",
+			field:      "ptr.count",
+		},
+		{
+			name:       "slice element",
+			in:         `{"items": [{"count": 1}, {"count": "x"}]}`,
+			newPtr:     func() interface{} { return new(Outer) },
+			value:      "string",
+			typ:        intType,
+			structName: "Outer",
+			field:      "items.1.count",
+		},
+		{
+			name:       "slice index",
+			in:         `{"nums": [1, "x"]}`,
+			newPtr:     func() interface{} { return new(Outer) },
+			value:      "string",
+			typ:        intType,
+			structName: "Outer",
+			field:      "nums.1",
+		},
+		{
+			name:       "top-level slice",
+			in:         `["x"]`,
+			newPtr:     func() interface{} { return new([]int) },
+			value:      "string",
+			typ:        intType,
+			structName: "",
+			field:      "0",
+		},
+		{
+			name:       "anonymous struct",
+			in:         `{"anon": {"v": "x"}}`,
+			newPtr:     func() interface{} { return new(Outer) },
+			value:      "string",
+			typ:        intType,
+			structName: "Outer",
+			field:      "anon.v",
+		},
+		{
+			name:       "embedded field",
+			in:         `{"Level1a": "hello"}`,
+			newPtr:     func() interface{} { return new(Top) },
+			value:      "string",
+			typ:        intType,
+			structName: "Top",
+			field:      "Level1a",
+		},
+		{
+			name:       "embedded named field",
+			in:         `{"e": {"Level1a": "hello"}}`,
+			newPtr:     func() interface{} { return new(Top) },
+			value:      "string",
+			typ:        intType,
+			structName: "Top",
+			field:      "e.Level1a",
+		},
+		{
+			name:       "deeply embedded",
+			in:         `{"n": "x"}`,
+			newPtr:     func() interface{} { return new(Deep) },
+			value:      "string",
+			typ:        intType,
+			structName: "Deep",
+			field:      "n",
+		},
+		{
+			name:       "pointer slice element",
+			in:         `{"boxes": [null, {"n": "x"}]}`,
+			newPtr:     func() interface{} { return new(Holder) },
+			value:      "string",
+			typ:        intType,
+			structName: "Holder",
+			field:      "boxes.1.n",
+		},
+		{
+			name:       "map value",
+			in:         `{"data": {"a": "bob", "b": 1}}`,
+			newPtr:     func() interface{} { return new(Outer) },
+			value:      "number",
+			typ:        stringType,
+			structName: "Outer",
+			field:      "data.b",
+		},
+		{
+			name:       "slash in key",
+			in:         `{"a/b": "x"}`,
+			newPtr:     func() interface{} { return new(Slash) },
+			value:      "string",
+			typ:        intType,
+			structName: "Slash",
+			field:      "a~1b",
+		},
+		{
+			name:       "json5 unquoted key",
+			in:         "{timeout: '10s',}",
+			newPtr:     func() interface{} { return new(Config) },
+			value:      "string",
+			typ:        intType,
+			structName: "Config",
+			field:      "timeout",
+		},
+		{
+			name:       "key text is preserved",
+			in:         `{TIMEOUT: "10s"}`,
+			newPtr:     func() interface{} { return new(Config) },
+			value:      "string",
+			typ:        intType,
+			structName: "Config",
+			field:      "TIMEOUT",
+		},
+		{
+			name:       "number into bool",
+			in:         `{"ok": 1}`,
+			newPtr:     func() interface{} { return new(Flag) },
+			value:      "number",
+			typ:        boolType,
+			structName: "Flag",
+			field:      "ok",
+		},
+		{
+			name:       "first mismatch wins",
+			in:         `{"b": true, "a": "nope"}`,
+			newPtr:     func() interface{} { return new(Pair) },
+			value:      "bool",
+			typ:        intType,
+			structName: "Pair",
+			field:      "b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Unmarshal([]byte(tt.in), tt.newPtr())
+			assertTypeError(t, err, tt)
+		})
+	}
+
+	t.Run("decoder", func(t *testing.T) {
+		dec := NewDecoder(strings.NewReader(`{"timeout": "10s"}`))
+		err := dec.Decode(new(Config))
+		assertTypeError(t, err, fieldTypeError{
+			value:      "string",
+			typ:        intType,
+			structName: "Config",
+			field:      "timeout",
+		})
+	})
+
+	t.Run("decoder does not leak field path", func(t *testing.T) {
+		type timeout struct {
+			Timeout int `json:"timeout"`
+		}
+		type name struct {
+			Name int `json:"name"`
+		}
+		dec := NewDecoder(strings.NewReader(`{"timeout":"x"}{"name":"y"}`))
+		err := dec.Decode(new(timeout))
+		assertTypeError(t, err, fieldTypeError{
+			value:      "string",
+			typ:        intType,
+			structName: "timeout",
+			field:      "timeout",
+		})
+		err = dec.Decode(new(name))
+		assertTypeError(t, err, fieldTypeError{
+			value:      "string",
+			typ:        intType,
+			structName: "name",
+			field:      "name",
+		})
+	})
+
+	t.Run("later field is still decoded", func(t *testing.T) {
+		type cfg struct {
+			Timeout int    `json:"timeout"`
+			Name    string `json:"name"`
+		}
+		got := cfg{}
+		err := Unmarshal([]byte(`{"timeout": "10s", "name": "ok"}`), &got)
+		assertTypeError(t, err, fieldTypeError{
+			value:      "string",
+			typ:        intType,
+			structName: "cfg",
+			field:      "timeout",
+		})
+		if got.Name != "ok" || got.Timeout != 0 {
+			t.Errorf("partial value = %+v, want name ok and timeout 0", got)
+		}
+	})
+
+	t.Run("slice keeps earlier elements", func(t *testing.T) {
+		type Nested struct {
+			Count int `json:"count"`
+		}
+		type Outer struct {
+			Items []Nested `json:"items"`
+		}
+		var got Outer
+		err := Unmarshal([]byte(`{"items": [{"count": 1}, {"count": "x"}]}`), &got)
+		assertTypeError(t, err, fieldTypeError{
+			value:      "string",
+			typ:        intType,
+			structName: "Outer",
+			field:      "items.1.count",
+		})
+		if len(got.Items) != 2 || got.Items[0].Count != 1 || got.Items[1].Count != 0 {
+			t.Errorf("partial value = %+v, want [{1} {0}]", got.Items)
+		}
+	})
+
+	t.Run("top-level value has no field", func(t *testing.T) {
+		var n int
+		err := Unmarshal([]byte(`"x"`), &n)
+		assertTypeError(t, err, fieldTypeError{
+			value: "string",
+			typ:   intType,
+		})
+	})
+
+	t.Run("unmarshaler error is returned as-is", func(t *testing.T) {
+		type wrap struct {
+			S SS `json:"s"`
+		}
+		err := Unmarshal([]byte(`{"s": 23}`), new(wrap))
+		assertTypeError(t, err, fieldTypeError{
+			value:      "number",
+			typ:        reflect.TypeOf(SS("")),
+			structName: "",
+			field:      "leaf",
+		})
+		ute := err.(*UnmarshalTypeError)
+		if ute.Offset != 0 {
+			t.Errorf("Offset = %d, want 0 from the error returned by UnmarshalJSON", ute.Offset)
+		}
+	})
+}
+
+// SS returns a type error that already names an inner field.
+type SS string
+
+func (*SS) UnmarshalJSON([]byte) error {
+	return &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(SS("")), Field: "leaf"}
+}
+
+func typeErrorText(value string, typ reflect.Type, structName, field string) string {
+	if structName == "" && field == "" {
+		return "json: cannot unmarshal " + value + " into Go value of type " + typ.String()
+	}
+	intoWhat := "Go struct field "
+	i := strings.LastIndexByte(field, '.') + len(".")
+	if last := field[i:]; len(last) > 0 && strings.TrimRight(last, "0123456789") == "" {
+		intoWhat = ""
+	}
+	return "json: cannot unmarshal " + value + " into " + intoWhat + structName + "." + field + " of type " + typ.String()
+}
+
+func assertTypeError(t *testing.T, err error, want fieldTypeError) {
+	t.Helper()
+	ute, ok := err.(*UnmarshalTypeError)
+	if !ok {
+		t.Fatalf("error = %v, want *UnmarshalTypeError", err)
+	}
+	if ute.Value != want.value || ute.Type != want.typ || ute.Struct != want.structName || ute.Field != want.field {
+		t.Fatalf("UnmarshalTypeError = %+v, want Value %q Type %v Struct %q Field %q",
+			ute, want.value, want.typ, want.structName, want.field)
+	}
+	msg := typeErrorText(want.value, want.typ, want.structName, want.field)
+	if err.Error() != msg {
+		t.Fatalf("Error() = %q, want %q", err.Error(), msg)
 	}
 }
 
