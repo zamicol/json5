@@ -261,7 +261,7 @@ var unmarshalTests = []unmarshalTest{
 	{in: `"g-clef: \uD834\uDD1E"`, ptr: new(string), out: "g-clef: \U0001D11E"},
 	{in: `"invalid: \uD834x\uDD1E"`, ptr: new(string), out: "invalid: \uFFFDx\uFFFD"},
 	{in: "null", ptr: new(interface{}), out: nil},
-	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf(""), 7}},
+	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf(""), 7, "T", "X"}},
 	{in: `{"x": 1}`, ptr: new(tx), out: tx{}},
 	{in: `{"x": 1}`, ptr: new(tx), err: fmt.Errorf("json: unknown field \"x\""), disallowUnknownFields: true},
 	{in: `{"F1":1,"F2":2,"F3":3}`, ptr: new(V), out: V{F1: float64(1), F2: int32(2), F3: Number("3")}},
@@ -479,12 +479,12 @@ var unmarshalTests = []unmarshalTest{
 	{
 		in:  `{"2009-11-10T23:00:00Z": "hello world"}`,
 		ptr: &map[Point]string{},
-		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[Point]string{}), 1},
+		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[Point]string{}), 1, "", ""},
 	},
 	{
 		in:  `{"asdf": "hello world"}`,
 		ptr: &map[unmarshaler]string{},
-		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[unmarshaler]string{}), 1},
+		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[unmarshaler]string{}), 1, "", ""},
 	},
 
 	// additional tests for disallowUnknownFields
@@ -1179,6 +1179,90 @@ func TestUnmarshalTypeError(t *testing.T) {
 			t.Errorf("expected type error for Unmarshal(%q, type %T): got %T",
 				item.src, item.dest, err)
 		}
+	}
+}
+
+// typeErrorFlat is a one-level struct for field mismatches.
+//   - Name: JSON5 unquoted key and single-quoted string
+//   - Note: number, reported through literalStore's panic path
+type typeErrorFlat struct {
+	Name int
+	Note string
+}
+
+// typeErrorNest is a nested destination:
+//   - struct field
+//   - map key with '/' and '~'
+//   - trailing slice index
+type typeErrorNest struct {
+	Inner struct {
+		M map[string][]int
+	}
+}
+
+// typeErrorJSON is a value whose UnmarshalJSON error must be returned unchanged.
+type typeErrorJSON struct{}
+
+// UnmarshalJSON returns a fixed error.
+func (typeErrorJSON) UnmarshalJSON([]byte) error { return errors.New("custom") }
+
+// TestUnmarshalTypeErrorFlat checks a flat field, including a JSON5 unquoted
+// key and a single-quoted string.
+func TestUnmarshalTypeErrorFlat(t *testing.T) {
+	var v typeErrorFlat
+	err := Unmarshal([]byte("{Name: 'nope'}"), &v)
+	const want = "json: cannot unmarshal string into Go struct field typeErrorFlat.Name of type int"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
+// TestUnmarshalTypeErrorPath checks a nested path that ends in an index, so the
+// error omits "Go struct field ".
+func TestUnmarshalTypeErrorPath(t *testing.T) {
+	var v typeErrorNest
+	err := Unmarshal([]byte(`{"Inner":{"M":{"a/b~c":[true]}}}`), &v)
+	const want = "json: cannot unmarshal bool into typeErrorNest.Inner.M.a~1b~0c.0 of type int"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
+// TestUnmarshalTypeErrorTopLevel checks a mismatch that names no struct or field.
+func TestUnmarshalTypeErrorTopLevel(t *testing.T) {
+	var v int
+	err := Unmarshal([]byte(`"x"`), &v)
+	const want = "json: cannot unmarshal string into Go value of type int"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
+// TestUnmarshalTypeErrorDecoderReuse checks that a second Decode does not keep
+// the previous value's field path.
+func TestUnmarshalTypeErrorDecoderReuse(t *testing.T) {
+	dec := NewDecoder(strings.NewReader("{Note: 1} true"))
+	var v typeErrorFlat
+	err := dec.Decode(&v)
+	const first = "json: cannot unmarshal number into Go struct field typeErrorFlat.Note of type string"
+	if err == nil || err.Error() != first {
+		t.Fatalf("first Decode = %v, want %q", err, first)
+	}
+	var n int
+	err = dec.Decode(&n)
+	const second = "json: cannot unmarshal bool into Go value of type int"
+	if err == nil || err.Error() != second {
+		t.Fatalf("second Decode = %v, want %q", err, second)
+	}
+}
+
+// TestUnmarshalTypeErrorUnmarshalJSON checks that a custom UnmarshalJSON error
+// is returned unchanged.
+func TestUnmarshalTypeErrorUnmarshalJSON(t *testing.T) {
+	var v struct{ U typeErrorJSON }
+	err := Unmarshal([]byte(`{"U":1}`), &v)
+	if err == nil || err.Error() != "custom" {
+		t.Fatalf("got %v, want custom", err)
 	}
 }
 
