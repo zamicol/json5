@@ -1204,7 +1204,9 @@ type typeErrorNest struct {
 type typeErrorJSON struct{}
 
 // UnmarshalJSON returns a fixed error.
-func (typeErrorJSON) UnmarshalJSON([]byte) error { return errors.New("custom") }
+func (typeErrorJSON) UnmarshalJSON([]byte) error {
+	return &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(typeErrorJSON{}), Field: "leaf"}
+}
 
 // TestUnmarshalTypeErrorFlat checks a flat field, including a JSON5 unquoted
 // key and a single-quoted string.
@@ -1261,8 +1263,10 @@ func TestUnmarshalTypeErrorDecoderReuse(t *testing.T) {
 func TestUnmarshalTypeErrorUnmarshalJSON(t *testing.T) {
 	var v struct{ U typeErrorJSON }
 	err := Unmarshal([]byte(`{"U":1}`), &v)
-	if err == nil || err.Error() != "custom" {
-		t.Fatalf("got %v, want custom", err)
+	ute, ok := err.(*UnmarshalTypeError)
+	const want = "json: cannot unmarshal number into Go struct field .leaf of type json5.typeErrorJSON"
+	if !ok || ute.Struct != "" || ute.Field != "leaf" || ute.Offset != 0 || ute.Error() != want {
+		t.Fatalf("got %#v, want Struct \"\", Field \"leaf\", Offset 0, %q", err, want)
 	}
 }
 

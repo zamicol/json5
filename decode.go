@@ -307,7 +307,7 @@ type decodeState struct {
 	disallowUnknownFields bool
 
 	rootType   reflect.Type // type passed to Unmarshal, after one pointer dereference
-	FieldStack []string     // path from the root to the value being decoded
+	fieldStack []string     // path from the root to the value being decoded
 }
 
 // errPhase is used for errors that should not happen unless
@@ -320,8 +320,8 @@ func (d *decodeState) init(data []byte) *decodeState {
 	d.off = 0
 	d.savedError = nil
 	d.rootType = nil
-	// Reuse the allocated space for the FieldStack slice.
-	d.FieldStack = d.FieldStack[:0]
+	// Reuse the allocated space for the fieldStack slice.
+	d.fieldStack = d.fieldStack[:0]
 	return d
 }
 
@@ -342,13 +342,13 @@ func (d *decodeState) saveError(err error) {
 // Errors from UnmarshalJSON and UnmarshalText are left unchanged.
 func (d *decodeState) addErrorContext(err error) error {
 	e, ok := err.(*UnmarshalTypeError)
-	if !ok || len(d.FieldStack) == 0 {
+	if !ok || len(d.fieldStack) == 0 {
 		return err
 	}
 	if d.rootType != nil {
 		e.Struct = d.rootType.Name()
 	}
-	e.Field = strings.Join(d.FieldStack, ".")
+	e.Field = strings.Join(d.fieldStack, ".")
 	return err
 }
 
@@ -596,9 +596,9 @@ func (d *decodeState) array(v reflect.Value) {
 
 		if i < v.Len() {
 			// Decode into element.
-			d.FieldStack = append(d.FieldStack, strconv.Itoa(i))
+			d.fieldStack = append(d.fieldStack, strconv.Itoa(i))
 			d.value(v.Index(i))
-			d.FieldStack = d.FieldStack[:len(d.FieldStack)-1]
+			d.fieldStack = d.fieldStack[:len(d.fieldStack)-1]
 		} else {
 			// Ran out of fixed array: skip.
 			d.value(reflect.Value{})
@@ -763,7 +763,7 @@ func (d *decodeState) object(v reflect.Value) {
 		}
 
 		if subv.IsValid() {
-			d.FieldStack = append(d.FieldStack, jsonPointerToken(string(key)))
+			d.fieldStack = append(d.fieldStack, jsonPointerToken(string(key)))
 		}
 
 		// Read value.
@@ -781,7 +781,7 @@ func (d *decodeState) object(v reflect.Value) {
 		}
 
 		if subv.IsValid() {
-			d.FieldStack = d.FieldStack[:len(d.FieldStack)-1]
+			d.fieldStack = d.fieldStack[:len(d.fieldStack)-1]
 		}
 
 		// Write value back to map;
